@@ -1,0 +1,346 @@
+---
+title: "DA1_6302"
+output: html_document
+date: "2025-02-03"
+---
+
+
+## Reading in data
+
+```{r}
+# Read in the data (train and test)
+realty2 <- read.csv("C:\\Users\\zaidb\\OneDrive - Southern Methodist University\\Fall 2024\\Classes\\STAT 6301 Experimental Stats\\Project\\train.csv")
+realty_test <- read.csv("C:\\Users\\zaidb\\OneDrive - Southern Methodist University\\Fall 2024\\Classes\\STAT 6301 Experimental Stats\\Project\\test.csv")
+
+```
+
+
+```{r}
+library(tidymodels)
+library(caret)
+
+# Ensure character columns are factors in both train and test sets
+realty2 <- realty2 %>%
+  mutate(across(where(is.character), as.factor))
+
+realty_test <- realty_test %>%
+  mutate(across(where(is.character), as.factor))
+
+
+# Align factor levels in test_data to match those in train_data
+for (col in names(realty2)) {
+  if (is.factor(realty2[[col]])) {
+    realty_test[[col]] <- factor(realty_test[[col]], levels = levels(realty2[[col]]))
+  }
+}
+
+# Create the recipe not excluding nzv 
+house_recipe_no_zv <- recipe(SalePrice ~., data = realty2) %>%
+    step_rm(Utilities) %>%
+    step_impute_knn(all_predictors()) %>%
+    step_novel(all_nominal_predictors()) %>%
+    step_other(all_nominal_predictors(), threshold = 0.05) %>%
+    step_mutate(
+        MoSold = -1 * cos(0.523599 * MoSold),
+        LotFrontage_LotArea = LotFrontage * LotArea,
+        TotalBsmtSF_X1stFlrSF = TotalBsmtSF * X1stFlrSF,
+        OverallQual_GarageCars = OverallQual * GarageCars,
+        GrLivArea_TotRmsAbvGrd = GrLivArea * TotRmsAbvGrd,
+        Total_Quality = OverallQual + OverallCond,
+        Total_Bathrooms = FullBath + 0.5 * HalfBath + BsmtFullBath + 0.5 * BsmtHalfBath,
+        MoSold_Fireplaces = MoSold * as.numeric(Fireplaces)
+    ) %>%
+  step_ns(GrLivArea, options = list(df = 5)) %>% # natural spline
+    step_BoxCox(LotArea, LotFrontage_LotArea) %>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_interact(terms = ~ OverallQual:GarageCars) %>%
+    step_log(SalePrice, base = exp(1)) %>%
+    step_normalize(all_numeric_predictors())
+
+# Prepare the recipe
+house_prep_no_zv <- prep(house_recipe_no_zv, training = realty2, retain = TRUE)  # retain = TRUE is crucial
+
+# Extract the data
+data_no_zv <- bake(house_prep_no_zv, new_data = realty2)
+
+# Identify near-zero variance variables using nearZeroVar() from caret
+
+nzv_vars <- nearZeroVar(data_no_zv, saveMetrics = TRUE)
+
+# Print or inspect the results
+print(nzv_vars)
+
+# Filter to see only near-zero variance variables (optional)
+nzv_vars_to_remove <- nzv_vars %>% filter(nzv == TRUE)
+print(nzv_vars_to_remove)
+
+
+
+#### NOW making recipe for training and test data INCLUDING step_zv
+# Create the recipe
+house_recipe <- recipe(SalePrice ~., data = realty2) %>%
+    step_rm(Utilities) %>%
+    step_impute_knn(all_predictors()) %>%
+    step_novel(all_nominal_predictors()) %>%
+    step_other(all_nominal_predictors(), threshold = 0.05) %>%
+    step_mutate(
+        MoSold = -1 * cos(0.523599 * MoSold),
+        LotFrontage_LotArea = LotFrontage * LotArea,
+        TotalBsmtSF_X1stFlrSF = TotalBsmtSF * X1stFlrSF,
+        OverallQual_GarageCars = OverallQual * GarageCars,
+        GrLivArea_TotRmsAbvGrd = GrLivArea * TotRmsAbvGrd,
+        Total_Quality = OverallQual + OverallCond,
+        Total_Bathrooms = FullBath + 0.5 * HalfBath + BsmtFullBath + 0.5 * BsmtHalfBath,
+        MoSold_Fireplaces = MoSold * as.numeric(Fireplaces)
+    ) %>%
+  step_ns(GrLivArea, options = list(df = 5)) %>% # natural spline
+    step_BoxCox(LotArea, LotFrontage_LotArea) %>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_interact(terms = ~ OverallQual:GarageCars) %>%
+    step_zv(all_predictors()) %>%
+    step_normalize(all_numeric_predictors())
+
+# Apply log transformation only to the training data
+house_recipe2 <- house_recipe %>%
+    step_log(SalePrice, base = exp(1))
+
+# Prepare the recipe for realty2
+house_prep2 <- prep(house_recipe2, training = realty2)
+
+# Prepare the recipe for realty_test
+house_prep <- prep(house_recipe, training = realty2)
+
+# Apply the recipe to training and test data + actual test data
+train_processed <- bake(house_prep2, new_data = realty2)
+test_processed <- bake(house_prep, new_data = realty_test)
+
+
+# Define cross-validation folds
+cv_folds <- vfold_cv(train_processed, v = 5)
+
+# Define models
+ridge_model <- linear_reg(penalty = tune(), mixture = 0) %>% set_engine("glmnet")
+lasso_model <- linear_reg(penalty = tune(), mixture = 1) %>% set_engine("glmnet")
+elastic_net_model <- linear_reg(penalty = tune(), mixture = tune()) %>% set_engine("glmnet")
+
+# Create workflows
+ridge_workflow <- workflow() %>% add_model(ridge_model) %>% add_formula(SalePrice ~ .)
+lasso_workflow <- workflow() %>% add_model(lasso_model) %>% add_formula(SalePrice ~ .)
+elastic_net_workflow <- workflow() %>% add_model(elastic_net_model) %>% add_formula(SalePrice ~ .)
+
+# Tune models using cross-validation
+ridge_tune <- tune_grid(ridge_workflow, resamples = cv_folds, grid = 50)
+lasso_tune <- tune_grid(lasso_workflow, resamples = cv_folds, grid = 50)
+elastic_net_tune <- tune_grid(elastic_net_workflow, resamples = cv_folds, grid = 30)
+
+# Collect RMSE metrics for each model
+ridge_rmse <- collect_metrics(ridge_tune) %>% filter(.metric == "rmse")
+lasso_rmse <- collect_metrics(lasso_tune) %>% filter(.metric == "rmse")
+elastic_net_rmse <- collect_metrics(elastic_net_tune) %>% filter(.metric == "rmse")
+
+# Select best models based on RMSE
+best_ridge <- select_best(ridge_tune, metric = "rmse")
+best_lasso <- select_best(lasso_tune, metric = "rmse")
+best_elastic_net <- select_best(elastic_net_tune, metric = "rmse")
+
+
+# Finalize workflows with best hyperparameters
+final_ridge_workflow <- finalize_workflow(ridge_workflow, best_ridge)
+final_lasso_workflow <- finalize_workflow(lasso_workflow, best_lasso)
+final_elastic_net_workflow <- finalize_workflow(elastic_net_workflow, best_elastic_net)
+
+
+# Fit the models on the training data
+final_ridge_fit <- fit(final_ridge_workflow, data = train_processed)
+final_lasso_fit <- fit(final_lasso_workflow, data = train_processed)
+final_elastic_net_fit <- fit(final_elastic_net_workflow, data = train_processed)
+
+# Extract coefficients
+lasso_coef <- tidy(final_lasso_fit)
+ridge_coef <- tidy(final_ridge_fit)
+elastic_net_coef <- tidy(final_elastic_net_fit)
+
+# Print coefficients
+print(lasso_coef)
+print(ridge_coef)
+print(elastic_net_coef)
+
+# Extract the fitted glmnet object from the workflow and print the solution path
+
+mfrow<-c(1,1)
+lasso_glmnet <- extract_fit_parsnip(final_lasso_fit)$fit
+plot(lasso_glmnet, main = "Lasso Path")
+
+ridge_glmnet <- extract_fit_parsnip(final_ridge_fit)$fit
+plot(ridge_glmnet, main = "Ridge Path")
+
+enet_glmnet <- extract_fit_parsnip(final_elastic_net_fit)$fit
+plot(enet_glmnet, main = "Elastic Net Path")
+
+# ggplot version
+
+library(patchwork)
+
+autoplot(lasso_glmnet) + ggtitle("Lasso Solution Path") +
+  autoplot(ridge_glmnet) + ggtitle("Ridge Solution Path") +
+  autoplot(enet_glmnet) + ggtitle("Elastic Net Solution Path")
+
+
+
+# Make predictions for the training dataset (use train_processed for RMSE calculation)
+ridge_predictions <- predict(final_ridge_fit, new_data = train_processed)
+lasso_predictions <- predict(final_lasso_fit, new_data = train_processed)
+elastic_net_predictions <- predict(final_elastic_net_fit, new_data = train_processed)
+
+# Combine the actual SalePrice and ridge predictions into one data frame
+ridge_results <- bind_cols(train_processed, ridge_predictions)
+# Calculate RMSE for Ridge
+ridge_rmse_value <- rmse(ridge_results, truth = SalePrice, estimate = .pred)
+
+# Combine the actual SalePrice and lasso predictions into one data frame
+lasso_results <- bind_cols(train_processed, lasso_predictions)
+# Calculate RMSE for Lasso
+lasso_rmse_value <- rmse(lasso_results, truth = SalePrice, estimate = .pred)
+
+# Combine the actual SalePrice and elastic net predictions into one data frame
+elastic_net_results <- bind_cols(train_processed, elastic_net_predictions)
+# Calculate RMSE for Elastic Net
+elastic_net_rmse_value <- rmse(elastic_net_results, truth = SalePrice, estimate = .pred)
+
+# Print the RMSE values
+cat("Ridge RMSE:", ridge_rmse_value$.estimate, "\n")
+cat("Lasso RMSE:", lasso_rmse_value$.estimate, "\n")
+cat("Elastic Net RMSE:", elastic_net_rmse_value$.estimate, "\n")
+
+
+# Select the best model workflow directly based on RMSE values
+if (lasso_rmse_value$.estimate <= min(ridge_rmse_value$.estimate, elastic_net_rmse_value$.estimate)) {
+  best_model <- final_lasso_fit
+} else if (ridge_rmse_value$.estimate <= elastic_net_rmse_value$.estimate) {
+  best_model <- final_ridge_fit
+} else {
+  best_model <- final_elastic_net_fit
+}
+
+# Extract the final fitted model from the workflow
+final_model <- best_model %>% extract_fit_parsnip()
+
+# Now you can make predictions using the final model
+final_predictions <- predict(final_model, new_data = test_processed)
+
+
+
+
+# Exponentiate predictions if needed (log-transformed SalePrice)
+final_predictions_exp <- exp(final_predictions$.pred)
+
+# Prepare the submission dataframe
+submission_df <- data.frame(Id = realty_test$Id, SalePrice = final_predictions_exp)
+
+# Save the submission dataframe to a CSV file
+write.csv(submission_df, "final_submission.csv", row.names = FALSE)
+
+# Preview the submission dataframe
+head(submission_df)
+
+
+```
+## Variable selection
+Below code is to note down variables that were removed from lasso and/or elastic net.
+
+```{r}
+# Extract all initial variables (excluding the target variable "SalePrice")
+initial_vars <- setdiff(colnames(train_processed), "SalePrice")
+cat("Initial variables:\n")
+print(initial_vars)
+# Extract nonzero coefficient variables for Lasso
+lasso_selected <- lasso_coef %>% filter(estimate != 0) %>% pull(term)
+lasso_removed <- setdiff(initial_vars, lasso_selected)
+
+# Extract nonzero coefficient variables for Elastic Net
+elastic_net_selected <- elastic_net_coef %>% filter(estimate != 0) %>% pull(term)
+elastic_net_removed <- setdiff(initial_vars, elastic_net_selected)
+
+# Print results
+cat("Variables removed by Lasso:\n")
+print(lasso_removed)
+
+cat("Variables removed by Elastic Net:\n")
+print(elastic_net_removed)
+
+
+```
+
+## Optimal tuning parameters
+
+```{r}
+
+# Note down optimal tuning parameters
+
+cat("Optimal tuning parameter for Ridge Regression:\n")
+print(best_ridge)
+
+cat("\nOptimal tuning parameter for Lasso Regression:\n")
+print(best_lasso)
+
+cat("\nOptimal tuning parameters for Elastic Net:\n")
+print(best_elastic_net)
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(realty2, aes(x = GrLivArea, y = SalePrice)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "SalePrice vs. GrLivArea", x = "GrLivArea", y = "SalePrice") +
+  theme_minimal()
+
+```
+
+Below there is some exploratory data analysis to see effects of certain variables on Sale price. From these, we chose to use the spline function on GrLivArea as there is a clear non linear pattern observed. 
+
+
+
+```{r}
+ggplot(realty2, aes(x = GrLivArea, y = SalePrice)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", span = 0.5, color = "blue") +
+  labs(title = "SalePrice vs. GrLivArea with LOESS Smoothing", x = "GrLivArea", y = "SalePrice") +
+  theme_minimal()
+
+```
+```{r}
+ggplot(realty2, aes(x = LotArea, y = SalePrice)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", span = 0.5, color = "blue") +
+  labs(title = "SalePrice vs. LotArea with LOESS Smoothing", x = "LotArea", y = "SalePrice") +
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(realty2, aes(x = YearBuilt, y = SalePrice)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", span = 0.5, color = "blue") +
+  labs(title = "SalePrice vs. YearBuilt with LOESS Smoothing", x = "YearBuilt", y = "SalePrice") +
+  theme_minimal()
+
+```
+```{r}
+ggplot(realty2, aes(x = OverallQual, y = SalePrice)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", span = 0.5, color = "blue") +
+  labs(title = "SalePrice vs. OverallQual with LOESS Smoothing", x = "OverallQual", y = "SalePrice") +
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(realty2, aes(x = GarageArea, y = SalePrice)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", span = 0.5, color = "blue") +
+  labs(title = "SalePrice vs. GarageArea with LOESS Smoothing", x = "GarageArea", y = "SalePrice") +
+  theme_minimal()
+
+```
+
