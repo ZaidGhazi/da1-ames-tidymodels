@@ -8,9 +8,11 @@ date: "2025-02-03"
 ## Reading in data
 
 ```{r}
-# Read in the data (train and test)
-realty2 <- read.csv("C:\\Users\\zaidb\\OneDrive - Southern Methodist University\\Fall 2024\\Classes\\STAT 6301 Experimental Stats\\Project\\train.csv")
-realty_test <- read.csv("C:\\Users\\zaidb\\OneDrive - Southern Methodist University\\Fall 2024\\Classes\\STAT 6301 Experimental Stats\\Project\\test.csv")
+train_path <- Sys.getenv("AMES_TRAIN_CSV", unset = "./data/train.csv")
+test_path <- Sys.getenv("AMES_TEST_CSV", unset = "./data/test.csv")
+
+realty2 <- read.csv(train_path)
+realty_test <- read.csv(test_path)
 
 ```
 

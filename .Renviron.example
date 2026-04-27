@@ -1,0 +1,3 @@
+# Placeholder paths only. Copy this file to .Renviron and update locally.
+AMES_TRAIN_CSV=./data/train.csv
+AMES_TEST_CSV=./data/test.csv
